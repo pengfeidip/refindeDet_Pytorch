@@ -17,6 +17,7 @@ from tensorboardX import SummaryWriter
 import datetime
 import argparse
 from utils.logging import Logger
+from apex import amp
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
@@ -51,10 +52,12 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--tensorboard', default=True, type=str2bool,
+parser.add_argument('--tensorboard', default=False, type=str2bool,
                     help='Use tensorboardX for loss visualization')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
+parser.add_argument('--mixed_precision', default=False, type=str2bool,
+                    help='Use apex to perform mixed precision training')
 args = parser.parse_args()
 
 
@@ -99,10 +102,8 @@ def train():
                                transform=SSDAugmentation(cfg['min_dim'],
                                                          MEANS))
     if args.tensorboard:
-
         now_time = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d-%H-%M')
         writer = SummaryWriter("runs/" + now_time[5:])
-
 
     refinedet_net = build_refinedet('train', cfg['min_dim'], cfg['num_classes'])
     net = refinedet_net
@@ -110,7 +111,7 @@ def train():
     #input()
 
     if args.cuda:
-        net = torch.nn.DataParallel(refinedet_net)
+        # net = torch.nn.DataParallel(refinedet_net)
         cudnn.benchmark = True
 
     if args.resume:
@@ -161,11 +162,15 @@ def train():
 
     step_index = 0
 
-
     data_loader = data.DataLoader(dataset, args.batch_size,
                                   num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate,
                                   pin_memory=True)
+
+    # half-float training from nvidia
+    if args.mixed_precision:
+        net, optimizer = amp.initialize(net, optimizer, opt_level="O1")
+
     # create batch iterator
     t_ = time.time()
     t0 = time.time()
@@ -203,7 +208,7 @@ def train():
             images = images
             targets = [ann for ann in targets]
         # forward
-        t0 = time.time()
+
         out = net(images)
         # backprop
         optimizer.zero_grad()
@@ -213,7 +218,12 @@ def train():
         arm_loss = arm_loss_l + arm_loss_c
         odm_loss = odm_loss_l + odm_loss_c
         loss = arm_loss + odm_loss
-        loss.backward()
+
+        if args.mixed_precision:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
         optimizer.step()
 
         arm_loc_loss += arm_loss_l.item()
@@ -230,6 +240,7 @@ def train():
             print('iter ' + repr(iteration + 1) + '/' + str(cfg['max_iter'])
                   + ' || ARM_L Loss: %.4f ARM_C Loss: %.4f ODM_L Loss: %.4f ODM_C Loss: %.4f ||' \
                   % (arm_loss_l.item(), arm_loss_c.item(), odm_loss_l.item(), odm_loss_c.item()), end=' ')
+
 
         if args.tensorboard:
             writer.add_scalars("data/loss_iter", {'arm_loss': arm_loss.item(),
@@ -268,7 +279,6 @@ def weights_init(m):
     elif isinstance(m, nn.ConvTranspose2d):
         xavier(m.weight.data)
         m.bias.data.zero_()
-
 
 
 
