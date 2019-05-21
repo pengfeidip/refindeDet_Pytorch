@@ -52,12 +52,13 @@ parser.add_argument('--weight_decay', default=5e-4, type=float,
                     help='Weight decay for SGD')
 parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
-parser.add_argument('--tensorboard', default=False, type=str2bool,
+parser.add_argument('--tensorboard', default=True, type=str2bool,
                     help='Use tensorboardX for loss visualization')
 parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('--mixed_precision', default=False, type=str2bool,
                     help='Use apex to perform mixed precision training')
+
 args = parser.parse_args()
 
 
@@ -171,6 +172,7 @@ def train():
     if args.mixed_precision:
         net, optimizer = amp.initialize(net, optimizer, opt_level="O1")
 
+
     # create batch iterator
     t_ = time.time()
     t0 = time.time()
@@ -208,22 +210,31 @@ def train():
             images = images
             targets = [ann for ann in targets]
         # forward
+        if args.mixed_precision:
+            images, permute_targets, lam = mixup(images, targets)
 
         out = net(images)
-        # backprop
         optimizer.zero_grad()
-        arm_loss_l, arm_loss_c = arm_criterion(out, targets)
-        odm_loss_l, odm_loss_c = odm_criterion(out, targets)
-        #input()
-        arm_loss = arm_loss_l + arm_loss_c
-        odm_loss = odm_loss_l + odm_loss_c
-        loss = arm_loss + odm_loss
+
+        if args.mixed_precision:
+            loss, loss_tuple= mixup_criterion(arm_criterion, odm_criterion, out, targets, permute_targets, lam)
+            arm_loss_l, arm_loss_c, odm_loss_l, odm_loss_c = loss_tuple
+            arm_loss = arm_loss_l + arm_loss_c
+            odm_loss = odm_loss_l + odm_loss_c
+        else:
+            arm_loss_l, arm_loss_c = arm_criterion(out, targets)
+            odm_loss_l, odm_loss_c = odm_criterion(out, targets)
+            #input()
+            arm_loss = arm_loss_l + arm_loss_c
+            odm_loss = odm_loss_l + odm_loss_c
+            loss = arm_loss + odm_loss
 
         if args.mixed_precision:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
         else:
             loss.backward()
+
         optimizer.step()
 
         arm_loc_loss += arm_loss_l.item()
@@ -241,12 +252,10 @@ def train():
                   + ' || ARM_L Loss: %.4f ARM_C Loss: %.4f ODM_L Loss: %.4f ODM_C Loss: %.4f ||' \
                   % (arm_loss_l.item(), arm_loss_c.item(), odm_loss_l.item(), odm_loss_c.item()), end=' ')
 
-
         if args.tensorboard:
             writer.add_scalars("data/loss_iter", {'arm_loss': arm_loss.item(),
                                                   'odm_loss': odm_loss.item(),
                                                   'total_loss': loss.item()}, iteration)
-
 
         if iteration != 0 and iteration % 5000 == 0:
             print('Saving state, iter:', iteration)
@@ -281,8 +290,46 @@ def weights_init(m):
         m.bias.data.zero_()
 
 
+def mixup(images, targets):
+    batch_size = images.size(0)
+    idx = torch.randperm(batch_size)
+    random_ims = images[idx, :, :, :]
+    lam = np.random.beta(1.5, 1.5)
+    mix_ims = lam * images + (1 - lam) * random_ims
+    permuted_targets = []
+    for i in idx:
+        permuted_targets.append(targets[i])
 
+    return mix_ims, permuted_targets, lam
 
+def mixup_criterion(arm_criterion, odm_criterion, out, targets_o, targets_p, lam):
+    """
+    :param arm_criterion: loss function of arm
+    :param odm_criterion: loss function of odm
+    :param out: output of network
+    :param targets_o: orginal targets
+    :param targets_p: permuted targets by mixup
+    :param lam: lambda
+    :return: mixup loss
+    """
+    arm_loss_l_orig, arm_loss_c_orig = arm_criterion(out, targets_o)
+    odm_loss_l_orig, odm_loss_c_orig = odm_criterion(out, targets_o)
+    arm_loss = arm_loss_l_orig + arm_loss_c_orig
+    odm_loss = odm_loss_l_orig + odm_loss_c_orig
+    loss = arm_loss + odm_loss
+
+    arm_loss_l, arm_loss_c = arm_criterion(out, targets_p)
+    odm_loss_l, odm_loss_c = odm_criterion(out, targets_p)
+    arm_loss = arm_loss_l + arm_loss_c
+    odm_loss = odm_loss_l + odm_loss_c
+    loss = lam * loss + (1-lam) * (arm_loss + odm_loss)
+
+    arm_loss_l = lam * arm_loss_l_orig + (1 - lam) * arm_loss_l
+    arm_loss_c = lam * arm_loss_c_orig + (1 - lam) * arm_loss_c
+    odm_loss_l = lam * odm_loss_l_orig + (1 - lam) * odm_loss_l
+    odm_loss_c = lam * odm_loss_c_orig + (1 - lam) * odm_loss_c
+
+    return loss, (arm_loss_l, arm_loss_c, odm_loss_l, odm_loss_c)
 
 if __name__ == '__main__':
     train()
