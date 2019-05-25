@@ -36,7 +36,7 @@ parser.add_argument('--basenet', default='./weights/vgg16_reducedfc.pth',
                     help='Pretrained base model')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str,
+parser.add_argument('--resume', default=None, type=str, #'./weights/RefineDet320_CSV_115000.pth'
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
@@ -58,7 +58,8 @@ parser.add_argument('--save_folder', default='weights/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('--mixed_precision', default=False, type=str2bool,
                     help='Use apex to perform mixed precision training')
-
+parser.add_argument('--mixed_up', default=True, type=str2bool,
+                    help='Use mixup data argumentation')
 args = parser.parse_args()
 
 
@@ -172,7 +173,6 @@ def train():
     if args.mixed_precision:
         net, optimizer = amp.initialize(net, optimizer, opt_level="O1")
 
-
     # create batch iterator
     t_ = time.time()
     t0 = time.time()
@@ -210,13 +210,13 @@ def train():
             images = images
             targets = [ann for ann in targets]
         # forward
-        if args.mixed_precision:
+        if args.mixed_up:
             images, permute_targets, lam = mixup(images, targets)
 
         out = net(images)
         optimizer.zero_grad()
 
-        if args.mixed_precision:
+        if args.mixed_up:
             loss, loss_tuple= mixup_criterion(arm_criterion, odm_criterion, out, targets, permute_targets, lam)
             arm_loss_l, arm_loss_c, odm_loss_l, odm_loss_c = loss_tuple
             arm_loss = arm_loss_l + arm_loss_c
@@ -294,7 +294,7 @@ def mixup(images, targets):
     batch_size = images.size(0)
     idx = torch.randperm(batch_size)
     random_ims = images[idx, :, :, :]
-    lam = np.random.beta(1.5, 1.5)
+    lam = 0.5
     mix_ims = lam * images + (1 - lam) * random_ims
     permuted_targets = []
     for i in idx:

@@ -144,10 +144,15 @@ def refine_match(threshold, truths, priors, variances, labels, loc_t, conf_t, id
     best_prior_idx.squeeze_(1)
     best_prior_overlap.squeeze_(1)
     best_truth_overlap.index_fill_(0, best_prior_idx, 2)  # ensure best prior
+
     # TODO refactor: index  best_prior_idx with long tensor
     # ensure every gt matches with its prior of max overlap
+    # if j-th gt box isn't assigned to any prior box,
+    # we need assign it to a prior box with max overlap
+    a = torch.unique(best_truth_idx)
     for j in range(best_prior_idx.size(0)):
-        best_truth_idx[best_prior_idx[j]] = j
+        if j not in a:
+            best_truth_idx[best_prior_idx[j]] = j
     matches = truths[best_truth_idx]          # Shape: [num_priors,4]
     if arm_loc is None:
         conf = labels[best_truth_idx]         # Shape: [num_priors]
