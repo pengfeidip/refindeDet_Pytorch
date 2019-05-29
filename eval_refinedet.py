@@ -15,6 +15,7 @@ import torch.utils.data as data
 
 from models.refinedet import build_refinedet
 
+from tqdm import tqdm
 import sys
 import os
 import time
@@ -22,6 +23,7 @@ import argparse
 import numpy as np
 import pickle
 import cv2
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 if sys.version_info[0] == 2:
     import xml.etree.cElementTree as ET
@@ -35,8 +37,8 @@ def str2bool(v):
 
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Evaluation')
-parser.add_argument('--trained_model',
-                    default='weights/ssd300_mAP_77.43_v2.pth', type=str,
+parser.add_argument('--trained_model', #'weights_backup/RefineDet320_CSV_115000.pth'
+                    default= 'weights/RefineDet512_CSV_final.pth', type=str,
                     help='Trained state_dict file path to open')
 parser.add_argument('--save_folder', default='eval/', type=str,
                     help='File path to save results')
@@ -50,7 +52,7 @@ parser.add_argument('--voc_root', default=VOC_ROOT,
                     help='Location of VOC root directory')
 parser.add_argument('--cleanup', default=True, type=str2bool,
                     help='Cleanup and remove results files following eval')
-parser.add_argument('--input_size', default='320', choices=['320', '512'],
+parser.add_argument('--input_size', default='512', choices=['320', '512'],
                     type=str, help='RefineDet320 or RefineDet512')
 
 args = parser.parse_args()
@@ -162,7 +164,7 @@ def write_voc_results_file(all_boxes, dataset):
                                    dets[k, 2] + 1, dets[k, 3] + 1))
 
 
-def do_python_eval(output_dir='output', use_07=True):
+def do_python_eval(output_dir='output', use_07=False):
     cachedir = os.path.join(devkit_path, 'annotations_cache')
     aps = []
     # The PASCAL VOC metric changed in 2010
@@ -193,7 +195,7 @@ def do_python_eval(output_dir='output', use_07=True):
     print('--------------------------------------------------------------')
 
 
-def voc_ap(rec, prec, use_07_metric=True):
+def voc_ap(rec, prec, use_07_metric=False):
     """ ap = voc_ap(rec, prec, [use_07_metric])
     Compute VOC AP given precision and recall.
     If use_07_metric is true, uses the
@@ -377,7 +379,7 @@ def test_net(save_folder, net, cuda, dataset, transform, top_k,
     output_dir = get_output_dir('ssd300_120000', set_type)
     det_file = os.path.join(output_dir, 'detections.pkl')
 
-    for i in range(num_images):
+    for i in tqdm(range(num_images)):
         im, gt, h, w = dataset.pull_item(i)
 
         x = Variable(im.unsqueeze(0))
@@ -405,8 +407,7 @@ def test_net(save_folder, net, cuda, dataset, transform, top_k,
                                                                  copy=False)
             all_boxes[j][i] = cls_dets
 
-        print('im_detect: {:d}/{:d} {:.3f}s'.format(i + 1,
-                                                    num_images, detect_time))
+
 
     with open(det_file, 'wb') as f:
         pickle.dump(all_boxes, f, pickle.HIGHEST_PROTOCOL)
@@ -432,6 +433,7 @@ if __name__ == '__main__':
                            BaseTransform(int(args.input_size), dataset_mean),
                            VOCAnnotationTransform())
     if args.cuda:
+
         net = net.cuda()
         cudnn.benchmark = True
     # evaluation

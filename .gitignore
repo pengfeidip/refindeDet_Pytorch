@@ -132,3 +132,6 @@ data/ssd_dataloader.py
 
 # all weights file
 *.pth
+
+# jupyter notebook
+*.ipynb

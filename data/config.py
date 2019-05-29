@@ -76,8 +76,8 @@ voc_refinedet = {
     },
     '512': {
         'num_classes': 21,
-        'lr_steps': (80000, 100000, 120000),
-        'max_iter': 120000,
+        'lr_steps': (90000, 110000, 140000),
+        'max_iter': 140000,
         'feature_maps': [64, 32, 16, 8],
         'min_dim': 512,
         'steps': [8, 16, 32, 64],
@@ -86,7 +86,7 @@ voc_refinedet = {
         'aspect_ratios': [[2], [2], [2], [2]],
         'variance': [0.1, 0.2],
         'clip': True,
-        'name': 'RefineDet_VOC_320',
+        'name': 'RefineDet_VOC_512',
     }
 }
 
