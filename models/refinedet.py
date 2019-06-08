@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from layers import *
 from data import voc_refinedet, coco_refinedet
 import os
-
+import time
 
 class RefineDet(nn.Module):
     """Single Shot Multibox Architecture
@@ -53,7 +53,7 @@ class RefineDet(nn.Module):
 
         if phase == 'test':
             self.softmax = nn.Softmax(dim=-1)
-            self.detect = Detect_RefineDet(num_classes, self.size, 0, 1000, 0.01, 0.45, 0.01, 500)
+            self.detect = Detect_RefineDet(num_classes, self.size, 0, 400, 0.01, 0.45, 0.01, 200)
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
@@ -80,6 +80,7 @@ class RefineDet(nn.Module):
         arm_conf = list()
         odm_loc = list()
         odm_conf = list()
+
 
         # apply vgg up to conv4_3 relu and conv5_3 relu
         for k in range(30):
@@ -137,7 +138,7 @@ class RefineDet(nn.Module):
         #print(arm_loc.size(), arm_conf.size(), odm_loc.size(), odm_conf.size())
 
         if self.phase == "test":
-            #print(loc, conf)
+
             output = self.detect(
                 arm_loc.view(arm_loc.size(0), -1, 4),           # arm loc preds
                 self.softmax(arm_conf.view(arm_conf.size(0), -1,
@@ -147,6 +148,7 @@ class RefineDet(nn.Module):
                              self.num_classes)),                # odm conf preds
                 self.priors.type(type(x.data))                  # default boxes
             )
+
         else:
             output = (
                 arm_loc.view(arm_loc.size(0), -1, 4),
@@ -155,6 +157,8 @@ class RefineDet(nn.Module):
                 odm_conf.view(odm_conf.size(0), -1, self.num_classes),
                 self.priors
             )
+
+
         return output
 
     def load_weights(self, base_file):

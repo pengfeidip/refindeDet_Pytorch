@@ -9,11 +9,11 @@ import numpy as np
 import sys
 import os
 import matplotlib.pyplot as plt
-import matplotlib
-
+import time
+import pandas as pd
 class ComputemAP:
 
-    def __init__(self, preds, labels, iou_thresh, class_list):
+    def __init__(self, preds, labels, iou_thresh, class_list, use_cuda):
         """
         :param
             preds: size is (N, 7), 7 means [im_name, xmin_ ymin, xmax, ymax, class_name, confidence]
@@ -31,6 +31,7 @@ class ComputemAP:
         self.labels = labels
         self.iou_thresh = iou_thresh
         self.class_list = class_list
+        self.use_cuda = use_cuda
 
     def __call__(self, *args, **kwargs):
         """
@@ -90,9 +91,12 @@ class ComputemAP:
             xmin, ymin, xmax, ymax,  conf, iou_thresh ： float
             im_name, class_name : str
         """
+
         try:
+            t1 = time.time()
             preds_spec_class = [x for x in preds if x[5] == class_name]
             labels_spec_class = [x for x in labels if x[5] == class_name]
+
         except:
             print(len(preds), preds[0])
             sys.exit(6)
@@ -103,30 +107,36 @@ class ComputemAP:
 
         preds_spec_class.sort(key=base_confidence, reverse=True)
 
-        #  label every prediction is true of false
-        for i_pred in preds_spec_class:
-            im_name = i_pred[0]
-            pred_bboxes = torch.tensor(i_pred[1:5]).unsqueeze(0).float()
 
-            #  get the ground truth from the same image
-            corresponding_label = [x[1:5] for x in labels_spec_class if x[0] == im_name]
 
-            #  this means
-            if len(corresponding_label) == 0:
-                i_pred.append(0)
-                continue
+        preds_coords = [x[1:5] for x in preds_spec_class]
+        gts_coords = [list(map(float, x[1:5])) for x in labels_spec_class]
+        preds_coords = torch.tensor(preds_coords, dtype=torch.float)
+        gts_coords = torch.tensor(gts_coords, dtype=torch.float)
 
-            corresponding_label = [list(map(int, x)) for x in corresponding_label]
-            corresponding_label_bboxes = torch.tensor(corresponding_label).float()
+        try:
+            iou = self.compute_iou(preds_coords, gts_coords).cpu()
+        except:
+            idx = 0
+            iou = torch.tensor([]).cpu()
+            gap = 7000
+            while True:
+                if idx+gap <  preds_coords.size(0):
+                    iou_temp = self.compute_iou(preds_coords[idx:idx+gap, :], gts_coords).cpu()
+                    iou = torch.cat((iou, iou_temp), 0)
+                    idx += gap
+                    torch.cuda.empty_cache()
+                else:
+                    iou_temp = self.compute_iou(preds_coords[idx:, :], gts_coords).cpu()
+                    iou = torch.cat((iou, iou_temp), 0)
+                    torch.cuda.empty_cache()
+                    break
 
-            # compute the iou
-            iou = self.compute_iou(pred_bboxes, corresponding_label_bboxes)
+        idx = torch.nonzero(iou.gt(0.5))
+        for i in idx:
+            if preds_spec_class[i[0]][0] == labels_spec_class[i[1]][0]:
+                preds_spec_class[i[0]].append(1)
 
-            #  if there are bounding box matched
-            if (iou.float() >= 0.5).sum().item() > 0:
-                i_pred.append(1)
-            else:
-                i_pred.append(0)
 
         """  compute the recall and precision """
         recall = np.zeros(len(preds_spec_class), dtype=np.float32)
@@ -134,7 +144,7 @@ class ComputemAP:
 
         k = 0
         for idx, i_pred in enumerate(preds_spec_class):
-            if i_pred[7] == 1:
+            if len(i_pred)>=8 :
                 k = k + 1
             recall[idx] = k / len(labels_spec_class)
             precision[idx] = k / (idx + 1)
@@ -157,6 +167,10 @@ class ComputemAP:
         ap_val = spaced_precision_sum / 11
 
         ap = {class_name: ap_val}
+
+        t2 = time.time()
+        print(ap ,end='  ')
+        print(t2-t1)
         return ap
 
     def compute_iou(self, box1, box2):
@@ -181,9 +195,13 @@ class ComputemAP:
             box2[:, 2:].unsqueeze(0).expand(N, M, 2),  # [M,2] -> [1,M,2] -> [N,M,2]
         )
 
+
         wh = rb - lt  # [N,M,2]
+        del rb
+        del lt
         wh[wh < 0] = 0  # clip at 0
         inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
+        del wh
 
         area1 = (box1[:, 2] - box1[:, 0]) * (box1[:, 3] - box1[:, 1])  # [N,]
         area2 = (box2[:, 2] - box2[:, 0]) * (box2[:, 3] - box2[:, 1])  # [M,]

@@ -110,20 +110,49 @@ def match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx):
     loc_t[idx] = loc    # [num_priors,4] encoded offsets to learn
     conf_t[idx] = conf  # [num_priors] top class label for each prior
 
+def RPN_match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx, arm_loc=None):
+    """Match strategy from RPN and retinaNet.
+
+    :param threshold:(list, float) threshold to label priors as positive or backgrounds or ignores. [2]
+    :param truths: (tensor) turths or targets. Shape: [num_objects, 4]
+    :param priors: (tensor) priors boxes. Shape: [num_priors, 4]
+    :param variances: (list) used in decoding boxes
+    :param labels:(tensor) all the classes index of truths Shape"[num_obj]
+    :param loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
+    :param conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds.
+    :param idx: (int) current batch index
+    :param arm_loc:(optional)use arm of not
+    :return:
+    """
+    if arm_loc is None:
+        overlaps = jaccard(truths, point_form(priors))
+    else:
+        decode_arm = decode(arm_loc, priors=priors, variances=variances)
+        overlaps = jaccard(truths, decode_arm)
+    # (Bipartite Matching)
+    # [1,num_objects] best prior for each ground truth
+    best_prior_overlap, best_prior_idx = overlaps.max(1, keepdim=False)
+    # [1,num_priors] best ground truth for each prior
+    best_truth_overlap, best_truth_idx = overlaps.max(0, keepdim=False)
+
+
+
+
+
 def refine_match(threshold, truths, priors, variances, labels, loc_t, conf_t, idx, arm_loc=None):
     """Match each arm bbox with the ground truth box of the highest jaccard
     overlap, encode the bounding boxes, then return the matched indices
     corresponding to both confidence and location preds.
     Args:
         threshold: (float) The overlap threshold used when mathing boxes.
-        truths: (tensor) Ground truth boxes, Shape: [num_obj, num_priors].
+        truths: (tensor) Ground truth boxes, Shape: [num_obj, 4].
         priors: (tensor) Prior boxes from priorbox layers, Shape: [n_priors,4].
-        variances: (tensor) Variances corresponding to each prior coord,
-            Shape: [num_priors, 4].
+        variances: (list) variance used when decode the boxes
         labels: (tensor) All the class labels for the image, Shape: [num_obj].
         loc_t: (tensor) Tensor to be filled w/ endcoded location targets.
         conf_t: (tensor) Tensor to be filled w/ matched indices for conf preds.
         idx: (int) current batch index
+        arm_lo (optional,) use arm of not
     Return:
         The matched indices corresponding to 1)location and 2)confidence preds.
     """
@@ -224,7 +253,7 @@ def log_sum_exp(x):
 # Original author: Francisco Massa:
 # https://github.com/fmassa/object-detection.torch
 # Ported to PyTorch by Max deGroot (02/01/2017)
-def nms(boxes, scores, overlap=0.5, top_k=200):
+def nms(boxes, scores, overlap=0.5, top_k=200, soft=False):
     """Apply non-maximum suppression at test time to avoid detecting too many
     overlapping bounding boxes for a given object.
     Args:
@@ -235,57 +264,59 @@ def nms(boxes, scores, overlap=0.5, top_k=200):
     Return:
         The indices of the kept boxes with respect to num_priors.
     """
-
     keep = scores.new(scores.size(0)).zero_().long()
-    if boxes.numel() == 0:
-        return keep
-    x1 = boxes[:, 0]
-    y1 = boxes[:, 1]
-    x2 = boxes[:, 2]
-    y2 = boxes[:, 3]
-    area = torch.mul(x2 - x1, y2 - y1)
-    v, idx = scores.sort(0)  # sort in ascending order
-    # I = I[v >= 0.01]
-    idx = idx[-top_k:]  # indices of the top-k largest vals
-    xx1 = boxes.new()
-    yy1 = boxes.new()
-    xx2 = boxes.new()
-    yy2 = boxes.new()
-    w = boxes.new()
-    h = boxes.new()
-
-    # keep = torch.Tensor()
     count = 0
-    while idx.numel() > 0:
-        i = idx[-1]  # index of current largest val
-        # keep.append(i)
-        keep[count] = i
-        count += 1
-        if idx.size(0) == 1:
-            break
-        idx = idx[:-1]  # remove kept element from view
-        # load bboxes of next highest vals
-        torch.index_select(x1, 0, idx, out=xx1)
-        torch.index_select(y1, 0, idx, out=yy1)
-        torch.index_select(x2, 0, idx, out=xx2)
-        torch.index_select(y2, 0, idx, out=yy2)
-        # store element-wise max with next highest score
-        xx1 = torch.clamp(xx1, min=x1[i])
-        yy1 = torch.clamp(yy1, min=y1[i])
-        xx2 = torch.clamp(xx2, max=x2[i])
-        yy2 = torch.clamp(yy2, max=y2[i])
-        w.resize_as_(xx2)
-        h.resize_as_(yy2)
-        w = xx2 - xx1
-        h = yy2 - yy1
-        # check sizes of xx1 and xx2.. after each iteration
-        w = torch.clamp(w, min=0.0)
-        h = torch.clamp(h, min=0.0)
-        inter = w*h
-        # IoU = i / (area(a) + area(b) - i)
-        rem_areas = torch.index_select(area, 0, idx)  # load remaining areas)
-        union = (rem_areas - inter) + area[i]
-        IoU = inter/union  # store result in iou
-        # keep only elements with an IoU <= overlap
-        idx = idx[IoU.le(overlap)]
-    return keep, count
+
+    # To save preserved boxes and scores
+    boxes_left = torch.zeros(boxes.shape).float()
+    scores_left = torch.zeros(scores.shape).float()
+    if soft:
+        new_boxes = boxes.clone()
+        new_scores = scores.clone()
+
+        while new_boxes.size(0)>0:
+            _, idx = new_scores.max(dim=0) # highest boxe index
+
+            highest_box = new_boxes[idx]
+            scores_left[count] = new_scores[idx]
+            boxes_left[count] = new_boxes[idx]
+            count += 1
+
+            # Delete the highest boxes info
+            new_scores = new_scores[torch.arange(new_scores.size(0))!=idx]
+            new_boxes = new_boxes[torch.arange(new_boxes.size(0))!= idx]
+
+            # IoU between highest box and other boxes
+            IoU = jaccard(new_boxes, highest_box.unsqueeze(0)).squeeze(1)
+            idx_iou = IoU.gt(overlap)
+
+            # Exclude the boxes which have large IoU with highest box
+            new_scores[idx_iou] = new_scores[idx_iou] * (1-IoU[idx_iou])
+            # new_scores = new_scores[idx_iou]
+            # new_boxes = new_boxes[idx_iou]
+    else:
+
+        if boxes.numel() == 0:
+            return keep
+
+        all_iou = jaccard(boxes, boxes)
+        v, idx = scores.sort(0)  # sort in ascending order
+        idx = idx[-top_k:]  # indices of the top-k largest vals
+
+        while idx.numel() > 0:
+            i = idx[-1]  # index of current largest val
+            # keep.append(i)
+            keep[count] = i
+            boxes_left[count] = boxes[i]
+            scores_left[count] = scores[i]
+
+            count += 1
+            if idx.size(0) == 1:
+                break
+            idx = idx[:-1]  # remove kept element from view
+
+            # IoU between highest box and other boxes
+            Iou = all_iou[idx.long(), i]
+            idx = idx[Iou.le(overlap)]
+
+    return boxes_left[:count, :], scores_left[:count]

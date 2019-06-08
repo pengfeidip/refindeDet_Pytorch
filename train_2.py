@@ -39,7 +39,7 @@ parser = argparse.ArgumentParser(
 # './backup_weights/RefineDet320_CSV_original.pth'
 #./weights/RefineDet320_CSV_final.pth
 parser.add_argument('--trained_model',
-                    default='./focal_loss_weights/RefineDet320_CSV_final.pth', type=str,
+                    default='./focal_loss_weights/RefineDet320_CSV_55000.pth', type=str,
                     help='Trained state_dict file path to open')
 parser.add_argument('--save_folder', default='eval/', type=str,
                     help='File path to save results')
@@ -101,53 +101,12 @@ class Timer(object):
 
 
 def test_net(net, dataset, gt_file):
-    num_images = len(dataset)
-    # all detections are collected into:
-    #    all_boxes[cls][image] = N x 5 array of detections in
-    #    (x1, y1, x2, y2, score)
 
-    # timers
-
-
-    # with torch.no_grad:
-    predictions = []
-    classes = list(dataset.classes.keys())
-    for i in tqdm(range(num_images)):#
-        t1 = time.time()
-        im_id = dataset.ids[i][0]
-        im, gt, h, w = dataset.pull_item(i)
-
-        x = im.unsqueeze(0)
-        if args.cuda:
-            x = x.cuda()
-        detections = net(x).data
-
-        # skip j = 0, because it's the background class
-        for j in range(1, detections.size(1)):
-            class_name = classes[j-1]
-            dets = detections[0, j, :]
-            mask = dets[:, 0].gt(0.01).expand(5, dets.size(0)).t()
-            dets = torch.masked_select(dets, mask).view(-1, 5)
-            if dets.size(0) == 0:
-                continue
-            boxes = dets[:, 1:]
-            boxes[:, 0] *= w
-            boxes[:, 2] *= w
-            boxes[:, 1] *= h
-            boxes[:, 3] *= h
-            scores = dets[:, 0].cpu().numpy()
-            cls_dets = np.hstack((boxes.cpu().numpy(),
-                                  scores[:, np.newaxis])).astype(np.float32,copy=False)
-
-            # [im_id, xmin, ymin, xmax, ymax, class_name, confidence]
-            for k in cls_dets:
-                temp = [im_id, *k]
-                temp.insert(-1, class_name)
-                predictions.append(temp)
-        t2 = time.time()
+    predictions = pd.read_csv('pred.csv', header=None).values.tolist()
 
     # save predictions in current path
-    pd.DataFrame(predictions).to_csv('pred.csv', header=None, index=None)
+
+
     print('Evaluating detections')
     evaluate_detections(predictions, dataset, gt_file)
 
@@ -159,7 +118,7 @@ def evaluate_detections(preds, dataset, gt_file):
         labels = list(csv.reader(f))
 
     print("Computing the mAp ing...... please wait a moment")
-    ap = ComputemAP(preds=preds, labels=labels, class_list=classes, iou_thresh=0.5, use_cuda=True)
+    ap = ComputemAP(preds=preds, labels=labels, class_list=classes, iou_thresh=0.5, use_cuda=False)
 
     mAP, ap_list = ap()
     for i in ap_list:
@@ -172,7 +131,7 @@ def evaluate_detections(preds, dataset, gt_file):
 if __name__ == '__main__':
     # load net
     num_classes = len(labelmap) + 1                      # +1 for background
-    gt_file = "./csv/voc/07_test.csv"
+    gt_file = "./csv/voc/0712_trainval.csv"
 
     dataset = CSVDataset(csv_file=gt_file,
                          classes_file='./csv/voc/classes.csv',

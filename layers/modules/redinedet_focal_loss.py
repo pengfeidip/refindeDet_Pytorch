@@ -7,7 +7,7 @@ from data import coco as cfg
 from ..box_utils import match, log_sum_exp, refine_match
 
 
-class RefineDetMultiBoxLoss(nn.Module):
+class RefineDetFocalLoss(nn.Module):
     """SSD Weighted Loss Function
     Compute Targets:
         1) Produce Confidence Target Indices by matching  ground truth boxes
@@ -33,7 +33,7 @@ class RefineDetMultiBoxLoss(nn.Module):
     def __init__(self, num_classes, overlap_thresh, prior_for_matching,
                  bkg_label, neg_mining, neg_pos, neg_overlap, encode_target,
                  use_gpu=True, theta=0.01, use_ARM=False):
-        super(RefineDetMultiBoxLoss, self).__init__()
+        super(RefineDetFocalLoss, self).__init__()
         self.use_gpu = use_gpu
         self.num_classes = num_classes
         self.threshold = overlap_thresh
@@ -44,9 +44,8 @@ class RefineDetMultiBoxLoss(nn.Module):
         self.negpos_ratio = neg_pos
         self.neg_overlap = neg_overlap
         self.variance = cfg['variance']
-        self.theta = theta
+        self.theta = theta # used in ARM for selecting boxes contains object
         self.use_ARM = use_ARM
-
 
     def forward(self, predictions, targets):
         """Multibox Loss
@@ -61,7 +60,9 @@ class RefineDetMultiBoxLoss(nn.Module):
                 shape: [batch_size,num_objs,5] (last idx is the label).
         """
         arm_loc_data, arm_conf_data, odm_loc_data, odm_conf_data, priors = predictions
-        #print(arm_loc_data.size(), arm_conf_data.size(), 
+        alpha = 0.25
+        gamma = 2
+        #print(arm_loc_data.size(), arm_conf_data.size(),
         #      odm_loc_data.size(), odm_conf_data.size(), priors.size())
         #input()
         if self.use_ARM:
@@ -117,35 +118,42 @@ class RefineDetMultiBoxLoss(nn.Module):
         loc_t = loc_t[pos_idx].view(-1, 4)
         loss_l = F.smooth_l1_loss(loc_p, loc_t, reduction='sum')
 
-
         # Compute max conf across batch for hard negative mining
         batch_conf = conf_data.view(-1, self.num_classes)
         loss_c = log_sum_exp(batch_conf) - batch_conf.gather(1, conf_t.view(-1, 1))
         # print(loss_c.size())
 
-        # Hard Negative Mining
+        # Hard Negative Mining for location loss
         loss_c[pos.view(-1,1)] = 0  # filter out pos boxes for now
         loss_c = loss_c.view(num, -1)
         _, loss_idx = loss_c.sort(1, descending=True)
         _, idx_rank = loss_idx.sort(1)
         num_pos = pos.long().sum(1, keepdim=True)
-        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1)
-        neg = idx_rank < num_neg.expand_as(idx_rank)
-        #print(num_pos.size(), num_neg.size(), neg.size())
 
-        # Confidence Loss Including Positive and Negative Examples
-        pos_idx = pos.unsqueeze(2).expand_as(conf_data)
-        neg_idx = neg.unsqueeze(2).expand_as(conf_data)
-        conf_p = conf_data[(pos_idx+neg_idx).gt(0)].view(-1, self.num_classes)
-        targets_weighted = conf_t[(pos+neg).gt(0)]
-        #print(pos_idx.size(), neg_idx.size(), conf_p.size(), targets_weighted.size())
-        loss_c = F.cross_entropy(conf_p, targets_weighted, reduction='sum')
+        # Focal loss for classification
+        loss_c = torch.tensor([0.])
+        # temp_loss_c = torch.tensor([0.])
+        for i in range(num):
 
+            i_conf_data = conf_data[i, :, :] # [num_priors, num_classes]
+            i_conf_t = conf_t[i].long() #[num_priors]
+            if self.use_ARM:
+                num_positive = i_conf_t.gt(0).sum().float() # number of priors with IoU greater than 0.5
+            else:
+                num_positive = i_conf_t.size(0)
+            conf_one_hot = torch.zeros(i_conf_data.shape)
+            conf_one_hot.scatter_(1, i_conf_t.unsqueeze(1), 1) # label to one-hot vector, [num_priors, num_classes]
+            if self.use_ARM:
+                conf_one_hot[:, 0] = 0 # avoid the background
+            pred_softmax = F.softmax(i_conf_data, dim=1)
+            focal_loss_weight = -1*(1-pred_softmax).pow(gamma) * alpha
+            i_loss = (conf_one_hot*pred_softmax.log()*focal_loss_weight).sum() / num_positive
+            loss_c += i_loss
+            # temp_loss_c = torch.cat((temp_loss_c, i_loss.unsqueeze(0)), 0)
         # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
 
         N = num_pos.data.sum().float()
         #N = max(num_pos.data.sum().float(), 1)
         loss_l /= N
-        loss_c /= N
         #print(N, loss_l, loss_c)
         return loss_l, loss_c

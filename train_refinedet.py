@@ -1,7 +1,7 @@
 from data import *
 from utils.augmentations import SSDAugmentation
 from layers.modules import RefineDetMultiBoxLoss
-#from ssd import build_ssd
+from layers.modules import RefineDetFocalLoss
 from models.refinedet import build_refinedet
 import os
 import sys
@@ -30,13 +30,13 @@ parser.add_argument('--dataset', default='CSV', choices=['VOC', 'COCO', 'CSV'],
                     type=str, help='VOC or COCO or CSV')
 parser.add_argument('--input_size', default='320', choices=['320', '512'],
                     type=str, help='RefineDet320 or RefineDet512')
-parser.add_argument('--dataset_root', default=VOC_ROOT,
+parser.add_argument('--dataset_root', default= VOC_ROOT,
                     help='Dataset root directory path')
 parser.add_argument('--basenet', default='./weights/vgg16_reducedfc.pth',
                     help='Pretrained base model')
 parser.add_argument('--batch_size', default=32, type=int,
                     help='Batch size for training')
-parser.add_argument('--resume', default=None, type=str, #'./weights/RefineDet320_CSV_115000.pth'
+parser.add_argument('--resume', default=None, type=str, #
                     help='Checkpoint state_dict file to resume training from')
 parser.add_argument('--start_iter', default=0, type=int,
                     help='Resume training at this iter')
@@ -54,14 +54,17 @@ parser.add_argument('--gamma', default=0.1, type=float,
                     help='Gamma update for SGD')
 parser.add_argument('--tensorboard', default=True, type=str2bool,
                     help='Use tensorboardX for loss visualization')
-parser.add_argument('--save_folder', default='weights/',
+parser.add_argument('--save_folder', default='focal_loss_weights/',
                     help='Directory for saving checkpoint models')
 parser.add_argument('--mixed_precision', default=False, type=str2bool,
                     help='Use apex to perform mixed precision training')
-parser.add_argument('--mixed_up', default=True, type=str2bool,
+parser.add_argument('--mixed_up', default=False, type=str2bool,
                     help='Use mixup data argumentation')
+parser.add_argument('--focal_loss', default=True, type=str2bool,
+                    help='Use mixup data argumentation')
+parser.add_argument('--tb_suffix', default='focal_loss', type=str,
+                    help='Suffix of tensorboard name')
 args = parser.parse_args()
-
 
 if torch.cuda.is_available():
     if args.cuda:
@@ -105,7 +108,7 @@ def train():
                                                          MEANS))
     if args.tensorboard:
         now_time = (datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d-%H-%M')
-        writer = SummaryWriter("runs/" + now_time[5:])
+        writer = SummaryWriter("runs/" + now_time[5:]+'_'+args.tb_suffix)
 
     refinedet_net = build_refinedet('train', cfg['min_dim'], cfg['num_classes'])
     net = refinedet_net
@@ -113,6 +116,7 @@ def train():
     #input()
 
     if args.cuda:
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
         # net = torch.nn.DataParallel(refinedet_net)
         cudnn.benchmark = True
 
@@ -143,10 +147,17 @@ def train():
 
     optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum,
                           weight_decay=args.weight_decay)
-    arm_criterion = RefineDetMultiBoxLoss(2, 0.5, True, 0, True, 3, 0.5,
-                             False, args.cuda)
-    odm_criterion = RefineDetMultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
+
+    if args.focal_loss:
+        odm_criterion = RefineDetFocalLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
                              False, args.cuda, use_ARM=True)
+        arm_criterion = RefineDetFocalLoss(2, 0.5, True, 0, True, 3, 0.5,
+                                              False, args.cuda)
+    else:
+        odm_criterion = RefineDetMultiBoxLoss(cfg['num_classes'], 0.5, True, 0, True, 3, 0.5,
+                             False, args.cuda, use_ARM=True)
+        arm_criterion = RefineDetMultiBoxLoss(2, 0.5, True, 0, True, 3, 0.5,
+                                              False, args.cuda)
 
     net.train()
     # loss counters
@@ -294,7 +305,7 @@ def mixup(images, targets):
     batch_size = images.size(0)
     idx = torch.randperm(batch_size)
     random_ims = images[idx, :, :, :]
-    lam = 0.5
+    lam = np.random.beta(1.5, 1.5)
     mix_ims = lam * images + (1 - lam) * random_ims
     permuted_targets = []
     for i in idx:

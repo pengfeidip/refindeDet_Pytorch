@@ -38,7 +38,7 @@ def str2bool(v):
 parser = argparse.ArgumentParser(
     description='Single Shot MultiBox Detector Evaluation')
 parser.add_argument('--trained_model', #'weights_backup/RefineDet320_CSV_115000.pth'
-                    default= 'weights/RefineDet512_CSV_final.pth', type=str,
+                    default= 'weights/RefineDet320_CSV_final.pth', type=str,
                     help='Trained state_dict file path to open')
 parser.add_argument('--save_folder', default='eval/', type=str,
                     help='File path to save results')
@@ -52,7 +52,7 @@ parser.add_argument('--voc_root', default=VOC_ROOT,
                     help='Location of VOC root directory')
 parser.add_argument('--cleanup', default=True, type=str2bool,
                     help='Cleanup and remove results files following eval')
-parser.add_argument('--input_size', default='512', choices=['320', '512'],
+parser.add_argument('--input_size', default='320', choices=['320', '512'],
                     type=str, help='RefineDet320 or RefineDet512')
 
 args = parser.parse_args()
@@ -382,7 +382,7 @@ def test_net(save_folder, net, cuda, dataset, transform, top_k,
     for i in tqdm(range(num_images)):
         im, gt, h, w = dataset.pull_item(i)
 
-        x = Variable(im.unsqueeze(0))
+        x = im.unsqueeze(0)
         if args.cuda:
             x = x.cuda()
         _t['im_detect'].tic()

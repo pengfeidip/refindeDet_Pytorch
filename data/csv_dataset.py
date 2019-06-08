@@ -18,7 +18,7 @@ import torch
 import torch.utils.data as data
 import cv2
 import numpy as np
-
+import pandas as pd
 
 class CSVAnnotationTransform(object):
     """Transforms a VOC annotation into a Tensor of bbox coords and label index
@@ -96,12 +96,10 @@ class CSVDataset(data.Dataset):
             temp = list(csv.reader(f))
 
         for i in temp:
-            self.img_lists.append(i[0])
-
-        for i in temp:
             self.targets.append(i[1:])
 
-        self.ids = list(set(self.img_lists))
+        self.ids = self._get_im_lists(csv_file)
+
     def __getitem__(self, index):
         im, gt, h, w = self.pull_item(index)
 
@@ -112,13 +110,17 @@ class CSVDataset(data.Dataset):
 
     def pull_item(self, index):
 
-        img_path = self.ids[index]
-        img = cv2.imread(img_path)
+        im_info = self.ids[index]
+        im_path = im_info[0]
+        img = cv2.imread(im_path)
+        # img = self.ims[index]
         height, width, channels = img.shape
 
-        idx = self.img_lists.index(img_path) # first bbox
-        num = self.img_lists.count(img_path) # num of bboxes
-        targets = self.targets[idx:idx+num] # all bboxes with labels
+        # Reshape the targets from [num_targets * 5] to [num_targets, 5]
+        num_targets = int( (len(im_info)-1) / 5)
+        targets = []
+        for i in range(num_targets):
+            targets.append(im_info[1+5*i:1+5*(i+1)])
 
         if self.target_transform is not None:
             target = self.target_transform(targets, width, height, self.classes)
@@ -159,11 +161,13 @@ class CSVDataset(data.Dataset):
             list:  [img_id, [(label, bbox coords),...]]
                 eg: ('001718', [('dog', (96, 13, 438, 332))])
         '''
-        img_path = self.ids[index]
+        im_info = self.ids[index]
 
-        idx = self.img_lists.index(img_path)
-        num = self.img_lists.count(img_path)
-        targets = self.targets[idx:idx+num]
+        # Reshape the targets from [num_targets * 5] to [num_targets, 5]
+        num_targets = int((len(im_info) - 1) / 5)
+        targets = []
+        for i in range(num_targets):
+            targets.append(im_info[1 + 5 * i:1 + 5 * (i + 1)])
 
         gt = self.target_transform(targets, 1, 1, self.classes)
         return targets, gt
@@ -182,3 +186,28 @@ class CSVDataset(data.Dataset):
         return torch.Tensor(self.pull_image(index)).unsqueeze_(0)
 
 
+    def _get_im_lists(self, dataset_file):
+        """
+        :param dataset_file: (string)  csv file contains objects
+        :return: (list) images list. Shape [num_images]
+                [[im_name_1, x1,y1,x2,y2, classes_name, ....], ....]
+        """
+        im_list_old = pd.read_csv(dataset_file).values.tolist()
+
+        im_list_new = []
+        current_im_name = ''
+
+        new_im = []
+        for index, i in enumerate(im_list_old):
+            if i[0] != current_im_name:
+                if index > 0:
+                    im_list_new.append(new_im)
+                new_im = i
+                current_im_name = i[0]
+            else:
+                new_im += i[1:]
+
+            if index == len(im_list_old) - 1:
+                im_list_new.append(new_im)
+
+        return im_list_new

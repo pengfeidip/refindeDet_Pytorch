@@ -2,6 +2,7 @@ import torch
 from torch.autograd import Function
 from ..box_utils import decode, nms, center_size
 from data import voc_refinedet as cfg
+import time
 
 
 class Detect_RefineDet(Function):
@@ -34,6 +35,7 @@ class Detect_RefineDet(Function):
             prior_data: (tensor) Prior boxes and variances from priorbox layers
                 Shape: [1,num_priors,4]
         """
+
         loc_data = odm_loc_data
         conf_data = odm_conf_data
 
@@ -49,28 +51,46 @@ class Detect_RefineDet(Function):
 
         # Decode predictions into bboxes.
         for i in range(num):
-            default = decode(arm_loc_data[i], prior_data, self.variance)
+
+            # Top 400 boxes per images(exclude the background confidence)
+            conf_scores = conf_preds[i].clone()  # [num_classes, num_priors]
+            values, _ = conf_scores[1:, :].max(0, keepdim=False)
+            _, indexes = values.sort(0, descending=True)
+            top_box_indexes = indexes[:self.top_k]
+            conf_scores = conf_scores[:, top_box_indexes]
+
+            # Decoding the selected boxes then performing NMS for every class
+            default = decode(arm_loc_data[i][top_box_indexes, :], prior_data[top_box_indexes, :], self.variance)
             default = center_size(default)
-            decoded_boxes = decode(loc_data[i], default, self.variance)
-            # For each class, perform nms
-            conf_scores = conf_preds[i].clone()
-            #print(decoded_boxes, conf_scores)
+            decoded_boxes = decode(loc_data[i][top_box_indexes, :], default, self.variance)
+
             for cl in range(1, self.num_classes):
-                c_mask = conf_scores[cl].gt(self.conf_thresh)
-                scores = conf_scores[cl][c_mask]
-                #print(scores.dim())
+                t1 = time.time()
+                c_mask = conf_scores[cl].gt(self.conf_thresh) # i-th class position mask
+                scores = conf_scores[cl][c_mask] # score which greater than threshold
+
                 if scores.size(0) == 0:
                     continue
                 l_mask = c_mask.unsqueeze(1).expand_as(decoded_boxes)
-                boxes = decoded_boxes[l_mask].view(-1, 4)
+                boxes = decoded_boxes[l_mask].view(-1, 4) #bounding
+
                 # idx of highest scoring and non-overlapping boxes per class
                 #print(boxes, scores)
-                ids, count = nms(boxes, scores, self.nms_thresh, self.top_k)
-                output[i, cl, :count] = \
-                    torch.cat((scores[ids[:count]].unsqueeze(1),
-                               boxes[ids[:count]]), 1)
+                boxes_preserved, scores_preserved = nms(boxes, scores, self.nms_thresh, 400)
+                output[i, cl, :boxes_preserved.size(0)] = \
+                    torch.cat((scores_preserved.unsqueeze(1),
+                               boxes_preserved), 1)
+
+        # print(all_boxes)
         flt = output.contiguous().view(num, -1, 5)
         _, idx = flt[:, :, 0].sort(1, descending=True)
-        _, rank = idx.sort(1)
-        flt[(rank < self.keep_top_k).unsqueeze(-1).expand_as(flt)].fill_(0)
+        _, rank = idx.sort(1) # rank of
+        # todo cannot undetstand
+        # 原始代码：flt[(rank < self.keep_top_k).unsqueeze(-1).expand_as(flt)].fille_(0)
+        # 但是我发现这个代码是不起作用的，好像这样对tensor进行索引不可行，因此我改成了下面的代码
+        # 利用masked_fill_来达成目的
+        # 更改后的代码：flt.masked_fill_((rank < self.keep_top_k).unsqueeze(-1).expand_as(flt), 0)
+        # 奇怪的是，
+        flt.masked_fill_((rank > self.keep_top_k).unsqueeze(-1).expand_as(flt), 0)
+
         return output
